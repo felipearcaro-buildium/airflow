@@ -21,6 +21,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from airflow.providers.common.compat.sdk import AirflowException
+from airflow.providers.salesforce.exceptions import SalesforceBulkOperationException
 from airflow.providers.salesforce.operators.bulk import SalesforceBulkOperator
 
 
@@ -84,7 +85,7 @@ class TestSalesforceBulkOperator:
         batch_size = 10000
         use_serial = True
 
-        mock_get_conn.return_value.bulk.__getattr__(object_name).insert = Mock()
+        mock_get_conn.return_value.bulk.__getattr__(object_name).insert = Mock(return_value=[])
         operator = SalesforceBulkOperator(
             task_id="bulk_insert",
             operation=operation,
@@ -117,7 +118,7 @@ class TestSalesforceBulkOperator:
         batch_size = 10000
         use_serial = True
 
-        mock_get_conn.return_value.bulk.__getattr__(object_name).update = Mock()
+        mock_get_conn.return_value.bulk.__getattr__(object_name).update = Mock(return_value=[])
         operator = SalesforceBulkOperator(
             task_id="bulk_update",
             operation=operation,
@@ -151,7 +152,7 @@ class TestSalesforceBulkOperator:
         batch_size = 10000
         use_serial = True
 
-        mock_get_conn.return_value.bulk.__getattr__(object_name).upsert = Mock()
+        mock_get_conn.return_value.bulk.__getattr__(object_name).upsert = Mock(return_value=[])
         operator = SalesforceBulkOperator(
             task_id="bulk_upsert",
             operation=operation,
@@ -186,7 +187,7 @@ class TestSalesforceBulkOperator:
         batch_size = 10000
         use_serial = True
 
-        mock_get_conn.return_value.bulk.__getattr__(object_name).delete = Mock()
+        mock_get_conn.return_value.bulk.__getattr__(object_name).delete = Mock(return_value=[])
         operator = SalesforceBulkOperator(
             task_id="bulk_delete",
             operation=operation,
@@ -219,7 +220,7 @@ class TestSalesforceBulkOperator:
         batch_size = 10000
         use_serial = True
 
-        mock_get_conn.return_value.bulk.__getattr__(object_name).hard_delete = Mock()
+        mock_get_conn.return_value.bulk.__getattr__(object_name).hard_delete = Mock(return_value=[])
         operator = SalesforceBulkOperator(
             task_id="bulk_hard_delete",
             operation=operation,
@@ -236,3 +237,55 @@ class TestSalesforceBulkOperator:
             batch_size=batch_size,
             use_serial=use_serial,
         )
+
+    def test_check_response_for_errors_all_success(self):
+        """
+        Test that all successful records do not raise an exception.
+        """
+        operator = SalesforceBulkOperator(
+            task_id="bulk_insert",
+            operation="insert",
+            object_name="Account",
+            payload=[],
+        )
+        result = [
+            {"success": True, "id": "001"},
+            {"success": True, "id": "002"},
+        ]
+        assert operator._check_response_for_errors(result) is None
+
+    @patch("airflow.providers.salesforce.operators.bulk.SalesforceHook.get_conn")
+    def test_execute_raises_on_failed_records(self, mock_get_conn):
+        """
+        Test that execute raises SalesforceBulkOperationException when API returns failures.
+        """
+        object_name = "Account"
+        payload = [{"Name": "account1"}, {"Name": "account2"}]
+        failed_record = {
+            "success": False,
+            "created": False,
+            "id": None,
+            "errors": [
+                {
+                    "statusCode": "INVALID_FIELD",
+                    "message": "Unexpected JsonMappingException: No such column 'Wrong_Asset_Key'"
+                    " on sobject of type Asset",
+                    "fields": [],
+                }
+            ],
+        }
+        mock_get_conn.return_value.bulk.__getattr__(object_name).insert = Mock(
+            return_value=[
+                {"success": True, "id": "001"},
+                failed_record,
+            ]
+        )
+        operator = SalesforceBulkOperator(
+            task_id="bulk_insert",
+            operation="insert",
+            object_name=object_name,
+            payload=payload,
+        )
+        with pytest.raises(SalesforceBulkOperationException, match="1/2 records") as exc_info:
+            operator.execute(context={})
+        assert "INVALID_FIELD" in str(exc_info.value)

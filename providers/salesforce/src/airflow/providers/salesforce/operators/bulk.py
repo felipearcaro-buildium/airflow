@@ -20,6 +20,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
 from airflow.providers.common.compat.sdk import BaseOperator
+from airflow.providers.salesforce.exceptions import SalesforceBulkOperationException
 from airflow.providers.salesforce.hooks.salesforce import SalesforceHook
 
 if TYPE_CHECKING:
@@ -82,6 +83,25 @@ class SalesforceBulkOperator(BaseOperator):
                 f"Available operations are {self.available_operations}."
             )
 
+    def _check_response_for_errors(self, result: Iterable):
+        """
+        Check the API response for any errors and raise an exception if any are found.
+
+        :param result: The API response from Salesforce Bulk API.
+        """
+        records = list(result)
+        if not records:
+            return
+
+        failed_records = [record for record in records if not record.get("success", False)]
+
+        if failed_records:
+            error_details = "\n".join(f"  - {record}" for record in failed_records)
+            raise SalesforceBulkOperationException(
+                f"Salesforce Bulk API {self.operation} operation failed "
+                f"for {len(failed_records)}/{len(records)} records:\n{error_details}"
+            )
+
     def execute(self, context: Context):
         """
         Make an HTTP request to Salesforce Bulk API.
@@ -118,7 +138,9 @@ class SalesforceBulkOperator(BaseOperator):
                 data=self.payload, batch_size=self.batch_size, use_serial=self.use_serial
             )
 
-        if self.do_xcom_push and result:
-            return result
+        if result:
+            self._check_response_for_errors(result)
+            if self.do_xcom_push:
+                return result
 
         return None
